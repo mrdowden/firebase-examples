@@ -1,0 +1,57 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOwnResource(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function sizeInMiB(size) {
+      return size * 1024 * 1024;
+    }
+
+    function getAccessData(uid) {
+      let accessPath = /databases/(default)/documents/access/$(uid);
+      let access = firestore.get(accessPath);
+      return access != null ? access.data : { 'roleId': null, 'totalStorageUsed': 0 };
+    }
+
+    function getRoleStoragePermissions(roleId) {
+      let featurePath = roleId != null ? /databases/(default)/documents/roles/$(roleId)/features/storage : null;
+      let feature = featurePath != null ? firestore.get(featurePath) : null;
+      return feature != null ? feature.data : {
+        'create': false, 'read': false, 'update': false, 'delete': false,
+        'maxFileSize': 0, 'maxTotalStorage': 0
+      };
+    }
+
+    function hasPermission(uid, permission) {
+      let roleId = getAccessData(uid).roleId;
+      let permissions = getRoleStoragePermissions(roleId);
+      return permissions[permission];
+    }
+
+    function canWriteFile(uid, permission) {
+      let accessData = getAccessData(uid);
+      let permissions = getRoleStoragePermissions(accessData.roleId);
+      let totalStorageUsed = accessData.totalStorageUsed != null ? accessData.totalStorageUsed : 0;
+      let maxTotalStorage = permissions.maxTotalStorage != null ? sizeInMib(permissions.maxTotalStorage) : 0;
+      let fileSize = request.resource.size;
+      let maxFileSize = permissions.maxFileSize != null ? sizeInMib(permissions.maxFileSize) : 0;
+      // Have permission, file is within size limits, file won't put us over storage quota
+      return permissions[permission]
+             && fileSize < maxFileSize
+             && totalStorageUsed + fileSize < maxTotalStorage;
+    }
+
+    match /users/{uid}/images/{filename=**} {
+      allow read:   if isOwnResource(uid) && hasPermission(uid, 'read');
+      allow create: if isOwnResource(uid) && isImage() && canWriteFile(uid, 'create');
+      allow update: if isOwnResource(uid) && isImage() && canWriteFile(uid, 'update');
+      allow delete: if isOwnResource(uid) && hasPermission(uid, 'delete');
+    }
+  }
+}
